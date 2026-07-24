@@ -108,13 +108,15 @@ async function syncAllLocations() {
         const { error } = await supabase
           .from('map_locations')
           .insert({
-            name:            formatChannelName(channelName),
-            discord_channel: channelName,
-            description:     channel.topic ?? '',
-            icon:            '📍',
-            color:           '#b96eff',
-            lat:             null,
-            lng:             null,
+            name:               formatChannelName(channelName),
+            discord_channel:    channelName,
+            discord_channel_id: channel.id,
+            discord_guild_id:   guild.id,
+            description:        channel.topic ?? '',
+            icon:               '📍',
+            color:              '#b96eff',
+            lat:                null,
+            lng:                null,
           })
 
         if (!error) {
@@ -122,6 +124,15 @@ async function syncAllLocations() {
         } else {
           console.error(`❌ Erreur création lieu "${channelName}":`, error.message)
         }
+      } else {
+        // Lieu déjà existant — s'assurer que les IDs Discord sont bien enregistrés
+        await supabase
+          .from('map_locations')
+          .update({
+            discord_channel_id: channel.id,
+            discord_guild_id:   guild.id,
+          })
+          .eq('id', existing.id)
       }
     }
   }
