@@ -1,5 +1,6 @@
-import { Client, GatewayIntentBits, Events } from 'discord.js'
+import { Client, GatewayIntentBits, Events, ActionRowBuilder, ButtonBuilder, ButtonStyle, AttachmentBuilder } from 'discord.js'
 import { createClient } from '@supabase/supabase-js'
+import { createCanvas, loadImage } from '@napi-rs/canvas'
 
 // ── Config ──────────────────────────────────────────────────
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN
@@ -15,6 +16,9 @@ const RP_CATEGORY_IDS = [
   '1523840728940150986',
   '1523840760670060634',
 ]
+
+// Durée de validité d'une confirmation "quel perso tu joues" (7 jours)
+const CONFIRM_VALIDITY_MS = 7 * 24 * 60 * 60 * 1000
 // ────────────────────────────────────────────────────────────
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY)
@@ -25,6 +29,7 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.DirectMessages,
   ]
 })
 
@@ -34,17 +39,193 @@ client.once(Events.ClientReady, async () => {
   await syncAllLocations()
 })
 
-// ── Nouveau message dans un salon RP ────────────────────────
+// ── Message reçu (RP move + commande !id) ───────────────────
 client.on(Events.MessageCreate, async message => {
   if (message.author.bot) return
 
+  // ── Commande "!id" — fonctionne partout (salon, MP) ────────
+  if (message.content.trim().toLowerCase() === '!id') {
+    await handleIdCommand(message)
+    return
+  }
+
+  // ── Commande "!fiche" — résumé personnage ───────────────────
+  if (message.content.trim().toLowerCase() === '!fiche') {
+    await handleFicheCommand(message)
+    return
+  }
+
+  // ── Déplacement sur la carte selon le salon RP ──────────────
   const categoryId = message.channel.parentId
   if (!categoryId || !RP_CATEGORY_IDS.includes(categoryId)) return
 
   const channelName = message.channel.name
-  console.log(`📍 Message de ${message.author.username} dans #${channelName}`)
+  const discordId = message.author.id
 
-  // Chercher le lieu correspondant au salon
+  const chars = await getCharacters(discordId)
+  if (chars.length === 0) {
+    console.log(`⚠️  ${message.author.username} pas encore connecté sur le site`)
+    return
+  }
+
+  const resolved = await resolveCharacter(discordId, chars)
+
+  if (resolved.status === 'ask') {
+    await askWhichCharacter(message, chars, 'charselect')
+    return
+  }
+
+  await moveCharacterToChannel(resolved.characterId, channelName, message.author.username)
+})
+
+// ── Réponse aux boutons (déplacement + carte ID) ─────────────
+client.on(Events.InteractionCreate, async interaction => {
+  if (!interaction.isButton()) return
+
+  const discordId = interaction.user.id
+
+  if (interaction.customId.startsWith('charselect_')) {
+    const characterId = interaction.customId.replace('charselect_', '')
+
+    await supabase.from('discord_character_confirmations').upsert({
+      discord_id: discordId,
+      character_id: characterId,
+      confirmed_at: new Date().toISOString(),
+    })
+
+    const channelName = interaction.channel.name
+    await moveCharacterToChannel(characterId, channelName, interaction.user.username)
+
+    await interaction.update({
+      content: `✅ Personnage confirmé pour la semaine à venir.`,
+      components: [],
+    })
+    return
+  }
+
+  if (interaction.customId.startsWith('idcard_')) {
+    const characterId = interaction.customId.replace('idcard_', '')
+
+    await supabase.from('discord_character_confirmations').upsert({
+      discord_id: discordId,
+      character_id: characterId,
+      confirmed_at: new Date().toISOString(),
+    })
+
+    await interaction.update({ content: `🪪 Génération de ta carte…`, components: [] })
+    await sendIdCard(characterId, interaction.user)
+    return
+  }
+
+  if (interaction.customId.startsWith('fiche_')) {
+    const characterId = interaction.customId.replace('fiche_', '')
+
+    await supabase.from('discord_character_confirmations').upsert({
+      discord_id: discordId,
+      character_id: characterId,
+      confirmed_at: new Date().toISOString(),
+    })
+
+    await interaction.update({ content: `🪄 Génération de ta fiche…`, components: [] })
+    await sendProfileCard(characterId, interaction.user)
+    return
+  }
+})
+
+// ── Commande !id ──────────────────────────────────────────────
+async function handleIdCommand(message) {
+  const discordId = message.author.id
+  const chars = await getCharacters(discordId)
+
+  if (chars.length === 0) {
+    await message.reply(`❌ Tu n'as pas encore de personnage sur le site Phoenix RP.`)
+    return
+  }
+
+  const resolved = await resolveCharacter(discordId, chars)
+
+  if (resolved.status === 'ask') {
+    await askWhichCharacter(message, chars, 'idcard')
+    return
+  }
+
+  await sendIdCard(resolved.characterId, message.author)
+}
+
+// ── Commande !fiche ──────────────────────────────────────────
+async function handleFicheCommand(message) {
+  const discordId = message.author.id
+  const chars = await getCharacters(discordId)
+
+  if (chars.length === 0) {
+    await message.reply(`❌ Tu n'as pas encore de personnage sur le site Phoenix RP.`)
+    return
+  }
+
+  const resolved = await resolveCharacter(discordId, chars)
+
+  if (resolved.status === 'ask') {
+    await askWhichCharacter(message, chars, 'fiche')
+    return
+  }
+
+  await sendProfileCard(resolved.characterId, message.author)
+}
+
+// Détermine quel personnage est actuellement joué (confirmation valide, ou auto si un seul)
+async function getCharacters(discordId) {
+  const { data } = await supabase
+    .from('profiles')
+    .select('id, username')
+    .eq('discord_id', discordId)
+  return data ?? []
+}
+
+async function resolveCharacter(discordId, chars) {
+  const { data: confirmation } = await supabase
+    .from('discord_character_confirmations')
+    .select('*')
+    .eq('discord_id', discordId)
+    .maybeSingle()
+
+  const isStale = !confirmation ||
+    (Date.now() - new Date(confirmation.confirmed_at).getTime() > CONFIRM_VALIDITY_MS)
+
+  const stillValid = confirmation && chars.some(c => c.id === confirmation.character_id)
+
+  if (!isStale && stillValid) {
+    return { status: 'ok', characterId: confirmation.character_id }
+  }
+
+  if (chars.length === 1) {
+    await supabase.from('discord_character_confirmations').upsert({
+      discord_id: discordId,
+      character_id: chars[0].id,
+      confirmed_at: new Date().toISOString(),
+    })
+    return { status: 'ok', characterId: chars[0].id }
+  }
+
+  return { status: 'ask' }
+}
+
+async function askWhichCharacter(message, chars, prefix) {
+  const row = new ActionRowBuilder().addComponents(
+    chars.slice(0, 5).map(c =>
+      new ButtonBuilder()
+        .setCustomId(`${prefix}_${c.id}`)
+        .setLabel(c.username)
+        .setStyle(ButtonStyle.Secondary)
+    )
+  )
+  await message.reply({
+    content: `🎭 ${message.author}, quel personnage incarnes-tu ?`,
+    components: [row],
+  })
+}
+
+// ── Déplace un personnage sur le lieu correspondant au salon ─
+async function moveCharacterToChannel(characterId, channelName, authorName) {
   const { data: location } = await supabase
     .from('map_locations')
     .select('id, lat, lng')
@@ -52,37 +233,413 @@ client.on(Events.MessageCreate, async message => {
     .maybeSingle()
 
   if (!location || !location.lat || !location.lng) {
-    // Lieu non encore positionné sur la carte — on ignore le déplacement
     console.log(`⚠️  Lieu "${channelName}" pas encore placé sur la carte`)
     return
   }
 
-  // Chercher le profil Supabase lié au compte Discord
-  const discordId = message.author.id
+  const { error } = await supabase
+    .from('profiles')
+    .update({ map_lat: location.lat, map_lng: location.lng })
+    .eq('id', characterId)
+
+  if (!error) {
+    console.log(`✅ ${authorName} déplacé vers "${channelName}"`)
+  }
+}
+
+// ── Génère et envoie la carte d'identité en MP ───────────────
+async function sendIdCard(characterId, discordUser) {
   const { data: profile } = await supabase
     .from('profiles')
-    .select('id')
-    .eq('discord_id', discordId)
+    .select('*')
+    .eq('id', characterId)
     .maybeSingle()
 
   if (!profile) {
-    console.log(`⚠️  Joueur Discord ${message.author.username} pas encore connecté sur le site`)
+    await discordUser.send(`❌ Personnage introuvable.`)
     return
   }
 
-  // Déplacer le joueur sur la carte
-  const { error } = await supabase
-    .from('profiles')
-    .update({
-      map_lat: location.lat,
-      map_lng: location.lng,
+  try {
+    const buffer = await generateIdCardImage(profile)
+    const attachment = new AttachmentBuilder(buffer, { name: 'id-card.png' })
+    await discordUser.send({
+      content: `🪪 Carte d'identité de **${profile.username}**`,
+      files: [attachment],
     })
-    .eq('id', profile.id)
-
-  if (!error) {
-    console.log(`✅ ${message.author.username} déplacé vers "${channelName}"`)
+    console.log(`✅ Carte ID envoyée à ${discordUser.username}`)
+  } catch (e) {
+    console.error('❌ Erreur envoi carte ID:', e.message)
+    try {
+      await discordUser.send(`❌ Une erreur est survenue lors de la génération de ta carte.`)
+    } catch {}
   }
-})
+}
+
+// Dessine une carte d'identité façon Arizona (même esprit que le site)
+async function generateIdCardImage(profile) {
+  const W = 340, H = 480
+  const canvas = createCanvas(W, H)
+  const ctx = canvas.getContext('2d')
+
+  // Fond crème
+  roundRect(ctx, 0, 0, W, H, 16)
+  ctx.fillStyle = '#f0ede6'
+  ctx.fill()
+
+  // ── Header rouge Arizona ──
+  const headerGrad = ctx.createLinearGradient(0, 0, W, 0)
+  headerGrad.addColorStop(0, '#8B1A1A')
+  headerGrad.addColorStop(0.5, '#C0392B')
+  headerGrad.addColorStop(1, '#8B1A1A')
+  ctx.fillStyle = headerGrad
+  ctx.fillRect(0, 0, W, 58)
+
+  ctx.fillStyle = '#ffffff'
+  ctx.font = 'bold 18px sans-serif'
+  ctx.fillText('ARIZONA', 54, 28)
+  ctx.font = '9px sans-serif'
+  ctx.fillStyle = 'rgba(255,255,255,0.85)'
+  ctx.fillText('DRIVER LICENSE / ID', 54, 42)
+
+  ctx.font = '8px sans-serif'
+  ctx.fillStyle = 'rgba(255,255,255,0.7)'
+  ctx.textAlign = 'right'
+  ctx.fillText('STATE OF ARIZONA', W - 14, 24)
+  ctx.fillText('CITY OF PHOENIX', W - 14, 36)
+  ctx.textAlign = 'left'
+
+  // Sceau
+  ctx.beginPath()
+  ctx.arc(30, 29, 16, 0, Math.PI * 2)
+  ctx.fillStyle = 'rgba(255,255,255,0.15)'
+  ctx.fill()
+  ctx.strokeStyle = 'rgba(255,255,255,0.4)'
+  ctx.lineWidth = 2
+  ctx.stroke()
+  ctx.font = '16px sans-serif'
+  ctx.fillStyle = '#fff'
+  ctx.fillText('🌵', 20, 35)
+
+  // Bande or
+  const goldGrad = ctx.createLinearGradient(0, 0, W, 0)
+  goldGrad.addColorStop(0, '#C8A040')
+  goldGrad.addColorStop(0.5, '#F0C040')
+  goldGrad.addColorStop(1, '#C8A040')
+  ctx.fillStyle = goldGrad
+  ctx.fillRect(0, 58, W, 4)
+
+  // ── Photo ──
+  const photoX = 16, photoY = 78, photoW = 96, photoH = 122
+  ctx.fillStyle = '#d0ccc4'
+  ctx.fillRect(photoX, photoY, photoW, photoH)
+  ctx.strokeStyle = '#aaa'
+  ctx.lineWidth = 1.5
+  ctx.strokeRect(photoX, photoY, photoW, photoH)
+
+  if (profile.avatar_url) {
+    try {
+      const res = await fetch(profile.avatar_url)
+      const buf = Buffer.from(await res.arrayBuffer())
+      const img = await loadImage(buf)
+      ctx.save()
+      ctx.beginPath()
+      ctx.rect(photoX, photoY, photoW, photoH)
+      ctx.clip()
+      ctx.filter = 'grayscale(100%) contrast(1.05)'
+      // Cover-fit
+      const scale = Math.max(photoW / img.width, photoH / img.height)
+      const dw = img.width * scale, dh = img.height * scale
+      ctx.drawImage(img, photoX + (photoW - dw) / 2, photoY + (photoH - dh) / 2, dw, dh)
+      ctx.restore()
+      ctx.filter = 'none'
+    } catch (e) {
+      console.error('Erreur chargement avatar:', e.message)
+    }
+  } else {
+    ctx.fillStyle = '#888'
+    ctx.font = '30px sans-serif'
+    ctx.fillText('👤', photoX + 32, photoY + 68)
+  }
+
+  // ── Champs à droite de la photo ──
+  const fx = photoX + photoW + 14
+  let fy = 90
+  const field = (label, value) => {
+    ctx.fillStyle = '#888'
+    ctx.font = '7px sans-serif'
+    ctx.fillText(label, fx, fy)
+    ctx.fillStyle = '#1a1a1a'
+    ctx.font = 'bold 11px monospace'
+    ctx.fillText(value ?? '—', fx, fy + 12)
+    fy += 26
+  }
+
+  field('DL/ID#', profile.id_number ?? generateIdNumber(profile.id))
+  field('DOB', profile.birth_date)
+  if (profile.height) field('HGT', profile.height)
+  if (profile.eye_color) field('EYES', profile.eye_color)
+
+  // ── Nom ──
+  let y = photoY + photoH + 26
+  ctx.fillStyle = '#777'
+  ctx.font = '8px sans-serif'
+  ctx.fillText('LAST NAME, FIRST NAME', 16, y)
+  y += 20
+  ctx.fillStyle = '#1a1a1a'
+  ctx.font = 'bold 20px sans-serif'
+  ctx.fillText((profile.username ?? '—').toUpperCase(), 16, y)
+
+  // ── Adresse ──
+  if (profile.rp_address) {
+    y += 24
+    ctx.fillStyle = '#777'
+    ctx.font = '8px sans-serif'
+    ctx.fillText('ADDRESS', 16, y)
+    y += 14
+    ctx.fillStyle = '#222'
+    ctx.font = '11px sans-serif'
+    ctx.fillText(profile.rp_address, 16, y)
+    y += 14
+    ctx.fillStyle = '#444'
+    ctx.font = '10px sans-serif'
+    ctx.fillText('PHOENIX, AZ', 16, y)
+  }
+
+  // ── Lieu de naissance ──
+  if (profile.birth_place) {
+    y += 22
+    ctx.fillStyle = '#777'
+    ctx.font = '8px sans-serif'
+    ctx.fillText('PLACE OF BIRTH', 16, y)
+    y += 13
+    ctx.fillStyle = '#222'
+    ctx.font = '11px sans-serif'
+    ctx.fillText(profile.birth_place, 16, y)
+  }
+
+  // ── Footer navy ──
+  ctx.fillStyle = '#1a1a2e'
+  ctx.fillRect(0, H - 24, W, 24)
+  ctx.fillStyle = 'rgba(255,255,255,0.5)'
+  ctx.font = '8px monospace'
+  ctx.fillText(profile.id_number ?? generateIdNumber(profile.id), 14, H - 9)
+  ctx.textAlign = 'right'
+  ctx.fillStyle = 'rgba(255,255,255,0.35)'
+  ctx.fillText('STATE OF ARIZONA', W - 14, H - 9)
+  ctx.textAlign = 'left'
+
+  return canvas.toBuffer('image/png')
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath()
+  ctx.moveTo(x + r, y)
+  ctx.arcTo(x + w, y, x + w, y + h, r)
+  ctx.arcTo(x + w, y + h, x, y + h, r)
+  ctx.arcTo(x, y + h, x, y, r)
+  ctx.arcTo(x, y, x + w, y, r)
+  ctx.closePath()
+}
+
+function generateIdNumber(id) {
+  const hash = id.replace(/-/g, '').slice(0, 8).toUpperCase()
+  return `A${hash.slice(0,3)}-${hash.slice(3,6)}-${hash.slice(6,8)}0`
+}
+
+// ═══════════════════════════════════════════════════════════
+// RÉSUMÉ PERSONNAGE (job, quartier, 4 stats)
+// ═══════════════════════════════════════════════════════════
+
+const fixImgur = url => url.replace('https://imgur.com/', 'https://i.imgur.com/')
+
+const CARD_BACKGROUND_URL = fixImgur('https://imgur.com/96PHtUY.png')
+
+const STAT_DEFS = [
+  { key: 'richesse',  label: 'Richesse',  icon: fixImgur('https://imgur.com/8ymiCIF.png'), color: '#f5c344' },
+  { key: 'legalite',  label: 'Légalité',  icon: fixImgur('https://imgur.com/8sOK8Tg.png'), color: '#e0a94a' },
+  { key: 'social',    label: 'Social',    icon: fixImgur('https://imgur.com/RG2khwT.png'), color: '#e0568f' },
+  { key: 'ascension', label: 'Ascension', icon: fixImgur('https://imgur.com/uJIB6A4.png'), color: '#4a90d9' },
+]
+
+async function sendProfileCard(characterId, discordUser) {
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('*')
+    .eq('id', characterId)
+    .maybeSingle()
+
+  if (!profile) {
+    await discordUser.send(`❌ Personnage introuvable.`)
+    return
+  }
+
+  try {
+    const buffer = await generateProfileCardImage(profile)
+    const attachment = new AttachmentBuilder(buffer, { name: 'fiche-personnage.png' })
+    await discordUser.send({
+      content: `🪄 Fiche personnage de **${profile.username}**`,
+      files: [attachment],
+    })
+    console.log(`✅ Fiche personnage envoyée à ${discordUser.username}`)
+  } catch (e) {
+    console.error('❌ Erreur envoi fiche:', e.message)
+    try {
+      await discordUser.send(`❌ Une erreur est survenue lors de la génération de ta fiche.`)
+    } catch {}
+  }
+}
+
+async function fetchImgBuffer(url) {
+  const res = await fetch(url)
+  return Buffer.from(await res.arrayBuffer())
+}
+
+function getStatValue(stats, key) {
+  if (!Array.isArray(stats)) return 50
+  const found = stats.find(s => s.key === key)
+  return found?.value ?? 50
+}
+
+async function generateProfileCardImage(profile) {
+  const W = 800, H = 460
+  const canvas = createCanvas(W, H)
+  const ctx = canvas.getContext('2d')
+
+  // Fond (image de ville)
+  try {
+    const bg = await loadImage(await fetchImgBuffer(CARD_BACKGROUND_URL))
+    const scale = Math.max(W / bg.width, H / bg.height)
+    const dw = bg.width * scale, dh = bg.height * scale
+    ctx.drawImage(bg, (W - dw) / 2, (H - dh) / 2, dw, dh)
+  } catch (e) {
+    ctx.fillStyle = '#1a1a1a'
+    ctx.fillRect(0, 0, W, H)
+  }
+
+  // Voile sombre
+  const overlay = ctx.createLinearGradient(0, 0, 0, H)
+  overlay.addColorStop(0, 'rgba(0,0,0,0.55)')
+  overlay.addColorStop(0.45, 'rgba(0,0,0,0.15)')
+  overlay.addColorStop(1, 'rgba(0,0,0,0.5)')
+  ctx.fillStyle = overlay
+  ctx.fillRect(0, 0, W, H)
+
+  // Avatar en haut à gauche
+  const avX = 90, avY = 110, avR = 70
+  ctx.save()
+  ctx.beginPath()
+  ctx.arc(avX, avY, avR, 0, Math.PI * 2)
+  ctx.closePath()
+  ctx.clip()
+  if (profile.avatar_url) {
+    try {
+      const img = await loadImage(await fetchImgBuffer(profile.avatar_url))
+      const scale = Math.max((avR * 2) / img.width, (avR * 2) / img.height)
+      const dw = img.width * scale, dh = img.height * scale
+      ctx.drawImage(img, avX - dw / 2, avY - dh / 2, dw, dh)
+    } catch {
+      drawAvatarFallback(ctx, avX, avY, avR * 2, profile)
+    }
+  } else {
+    drawAvatarFallback(ctx, avX, avY, avR * 2, profile)
+  }
+  ctx.restore()
+  ctx.beginPath()
+  ctx.arc(avX, avY, avR, 0, Math.PI * 2)
+  ctx.strokeStyle = 'rgba(255,255,255,0.6)'
+  ctx.lineWidth = 3
+  ctx.stroke()
+
+  // Texte à droite de l'avatar
+  const textX = avX + avR + 34
+  ctx.textAlign = 'left'
+  ctx.fillStyle = '#ffffff'
+  ctx.font = "800 44px sans-serif"
+  ctx.fillText(profile.username ?? 'Personnage', textX, 76)
+  ctx.font = "600 26px sans-serif"
+  ctx.fillStyle = 'rgba(255,255,255,0.9)'
+  ctx.fillText(profile.job || 'Sans emploi', textX, 112)
+  ctx.fillStyle = 'rgba(255,255,255,0.7)'
+  ctx.fillText(profile.location || 'Phoenix, AZ', textX, 146)
+
+  // Logo emploi en haut à droite
+  if (profile.job_logo_url) {
+    try {
+      const logo = await loadImage(await fetchImgBuffer(profile.job_logo_url))
+      const lw = 110
+      const lh = (logo.height / logo.width) * lw
+      ctx.drawImage(logo, W - lw - 30, 24, lw, lh)
+    } catch {}
+  }
+
+  // Badges de stats — colonne gauche
+  const stats = profile.stats
+  let by = 230
+  for (const def of STAT_DEFS) {
+    const val = getStatValue(stats, def.key)
+    const bx = 70
+
+    // Icône ronde
+    ctx.save()
+    ctx.beginPath()
+    ctx.arc(bx, by, 28, 0, Math.PI * 2)
+    ctx.fillStyle = def.color
+    ctx.fill()
+    try {
+      const icon = await loadImage(await fetchImgBuffer(def.icon))
+      ctx.beginPath()
+      ctx.arc(bx, by, 25, 0, Math.PI * 2)
+      ctx.clip()
+      ctx.drawImage(icon, bx - 25, by - 25, 50, 50)
+    } catch {}
+    ctx.restore()
+    ctx.beginPath()
+    ctx.arc(bx, by, 28, 0, Math.PI * 2)
+    ctx.strokeStyle = 'rgba(255,255,255,0.5)'
+    ctx.lineWidth = 2
+    ctx.stroke()
+
+    // Barre à droite de l'icône
+    const barX = bx + 46
+    const barW = 220
+    const barH = 12
+    ctx.font = "600 14px sans-serif"
+    ctx.fillStyle = '#fff'
+    ctx.fillText(`${def.label.toUpperCase()}  ${val}`, barX, by - 10)
+
+    roundRect(ctx, barX, by - 2, barW, barH, 6)
+    ctx.fillStyle = 'rgba(255,255,255,0.15)'
+    ctx.fill()
+    const fillW = Math.max(4, (barW * val) / 100)
+    roundRect(ctx, barX, by - 2, fillW, barH, 6)
+    ctx.fillStyle = def.color
+    ctx.fill()
+
+    by += 58
+  }
+
+  // Footer
+  ctx.textAlign = 'center'
+  ctx.font = '13px sans-serif'
+  ctx.fillStyle = 'rgba(255,255,255,0.3)'
+  ctx.fillText('PHOENIX RP · FICHE PERSONNAGE', W / 2, H - 16)
+  ctx.textAlign = 'left'
+
+  return canvas.toBuffer('image/png')
+}
+
+function drawAvatarFallback(ctx, x, y, size, profile) {
+  ctx.fillStyle = profile.avatar_color ?? '#7c3aed'
+  ctx.fillRect(x - size / 2, y - size / 2, size, size)
+  ctx.fillStyle = '#fff'
+  ctx.font = `bold ${size * 0.36}px sans-serif`
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  ctx.fillText(profile.initials ?? '?', x, y)
+  ctx.textBaseline = 'alphabetic'
+  ctx.textAlign = 'left'
+}
 
 // ── Sync tous les salons des catégories RP ──────────────────
 async function syncAllLocations() {
@@ -96,7 +653,6 @@ async function syncAllLocations() {
     for (const channel of channels.values()) {
       const channelName = channel.name
 
-      // Vérifier si le lieu existe déjà
       const { data: existing } = await supabase
         .from('map_locations')
         .select('id')
@@ -104,7 +660,6 @@ async function syncAllLocations() {
         .maybeSingle()
 
       if (!existing) {
-        // Créer le lieu sans coordonnées (à placer par le MJ)
         const { error } = await supabase
           .from('map_locations')
           .insert({
@@ -125,7 +680,6 @@ async function syncAllLocations() {
           console.error(`❌ Erreur création lieu "${channelName}":`, error.message)
         }
       } else {
-        // Lieu déjà existant — s'assurer que les IDs Discord sont bien enregistrés
         await supabase
           .from('map_locations')
           .update({
