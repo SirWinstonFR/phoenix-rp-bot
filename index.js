@@ -1,6 +1,6 @@
 import { Client, GatewayIntentBits, Events, ActionRowBuilder, ButtonBuilder, ButtonStyle, AttachmentBuilder } from 'discord.js'
 import { createClient } from '@supabase/supabase-js'
-import { createCanvas, loadImage } from '@napi-rs/canvas'
+import { createCanvas, loadImage, GlobalFonts } from '@napi-rs/canvas'
 
 // ── Config ──────────────────────────────────────────────────
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN
@@ -22,6 +22,20 @@ const CONFIRM_VALIDITY_MS = 7 * 24 * 60 * 60 * 1000
 // ────────────────────────────────────────────────────────────
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY)
+
+// Un conteneur serveur n'a AUCUNE police installée par défaut —
+// sans ça, tout le texte dessiné sur les images serait invisible.
+async function loadFonts() {
+  try {
+    const res = await fetch('https://raw.githubusercontent.com/google/fonts/main/ofl/oswald/Oswald%5Bwght%5D.ttf')
+    const buf = Buffer.from(await res.arrayBuffer())
+    GlobalFonts.register(buf, 'Oswald')
+    console.log('✅ Police chargée (Oswald)')
+  } catch (e) {
+    console.error('⚠️  Impossible de charger la police, le texte des images risque d\'être invisible:', e.message)
+  }
+}
+await loadFonts()
 
 const client = new Client({
   intents: [
@@ -296,13 +310,13 @@ async function generateIdCardImage(profile) {
   ctx.fillRect(0, 0, W, 58)
 
   ctx.fillStyle = '#ffffff'
-  ctx.font = 'bold 18px sans-serif'
+  ctx.font = 'bold 18px Oswald'
   ctx.fillText('ARIZONA', 54, 28)
-  ctx.font = '9px sans-serif'
+  ctx.font = '9px Oswald'
   ctx.fillStyle = 'rgba(255,255,255,0.85)'
   ctx.fillText('DRIVER LICENSE / ID', 54, 42)
 
-  ctx.font = '8px sans-serif'
+  ctx.font = '8px Oswald'
   ctx.fillStyle = 'rgba(255,255,255,0.7)'
   ctx.textAlign = 'right'
   ctx.fillText('STATE OF ARIZONA', W - 14, 24)
@@ -317,7 +331,7 @@ async function generateIdCardImage(profile) {
   ctx.strokeStyle = 'rgba(255,255,255,0.4)'
   ctx.lineWidth = 2
   ctx.stroke()
-  ctx.font = '16px sans-serif'
+  ctx.font = '16px Oswald'
   ctx.fillStyle = '#fff'
   ctx.fillText('🌵', 20, 35)
 
@@ -358,7 +372,7 @@ async function generateIdCardImage(profile) {
     }
   } else {
     ctx.fillStyle = '#888'
-    ctx.font = '30px sans-serif'
+    ctx.font = '30px Oswald'
     ctx.fillText('👤', photoX + 32, photoY + 68)
   }
 
@@ -367,10 +381,10 @@ async function generateIdCardImage(profile) {
   let fy = 90
   const field = (label, value) => {
     ctx.fillStyle = '#888'
-    ctx.font = '7px sans-serif'
+    ctx.font = '7px Oswald'
     ctx.fillText(label, fx, fy)
     ctx.fillStyle = '#1a1a1a'
-    ctx.font = 'bold 11px monospace'
+    ctx.font = 'bold 11px Oswald'
     ctx.fillText(value ?? '—', fx, fy + 12)
     fy += 26
   }
@@ -383,26 +397,26 @@ async function generateIdCardImage(profile) {
   // ── Nom ──
   let y = photoY + photoH + 26
   ctx.fillStyle = '#777'
-  ctx.font = '8px sans-serif'
+  ctx.font = '8px Oswald'
   ctx.fillText('LAST NAME, FIRST NAME', 16, y)
   y += 20
   ctx.fillStyle = '#1a1a1a'
-  ctx.font = 'bold 20px sans-serif'
+  ctx.font = 'bold 20px Oswald'
   ctx.fillText((profile.username ?? '—').toUpperCase(), 16, y)
 
   // ── Adresse ──
   if (profile.rp_address) {
     y += 24
     ctx.fillStyle = '#777'
-    ctx.font = '8px sans-serif'
+    ctx.font = '8px Oswald'
     ctx.fillText('ADDRESS', 16, y)
     y += 14
     ctx.fillStyle = '#222'
-    ctx.font = '11px sans-serif'
+    ctx.font = '11px Oswald'
     ctx.fillText(profile.rp_address, 16, y)
     y += 14
     ctx.fillStyle = '#444'
-    ctx.font = '10px sans-serif'
+    ctx.font = '10px Oswald'
     ctx.fillText('PHOENIX, AZ', 16, y)
   }
 
@@ -410,11 +424,11 @@ async function generateIdCardImage(profile) {
   if (profile.birth_place) {
     y += 22
     ctx.fillStyle = '#777'
-    ctx.font = '8px sans-serif'
+    ctx.font = '8px Oswald'
     ctx.fillText('PLACE OF BIRTH', 16, y)
     y += 13
     ctx.fillStyle = '#222'
-    ctx.font = '11px sans-serif'
+    ctx.font = '11px Oswald'
     ctx.fillText(profile.birth_place, 16, y)
   }
 
@@ -422,7 +436,7 @@ async function generateIdCardImage(profile) {
   ctx.fillStyle = '#1a1a2e'
   ctx.fillRect(0, H - 24, W, 24)
   ctx.fillStyle = 'rgba(255,255,255,0.5)'
-  ctx.font = '8px monospace'
+  ctx.font = '8px Oswald'
   ctx.fillText(profile.id_number ?? generateIdNumber(profile.id), 14, H - 9)
   ctx.textAlign = 'right'
   ctx.fillStyle = 'rgba(255,255,255,0.35)'
@@ -555,9 +569,9 @@ async function generateProfileCardImage(profile) {
   const textX = avX + avR + 34
   ctx.textAlign = 'left'
   ctx.fillStyle = '#ffffff'
-  ctx.font = "800 44px sans-serif"
+  ctx.font = "800 44px Oswald"
   ctx.fillText(profile.username ?? 'Personnage', textX, 76)
-  ctx.font = "600 26px sans-serif"
+  ctx.font = "600 26px Oswald"
   ctx.fillStyle = 'rgba(255,255,255,0.9)'
   ctx.fillText(profile.job || 'Sans emploi', textX, 112)
   ctx.fillStyle = 'rgba(255,255,255,0.7)'
@@ -600,28 +614,27 @@ async function generateProfileCardImage(profile) {
     ctx.lineWidth = 2
     ctx.stroke()
 
-    // Barre à droite de l'icône
+    // Compteur en 10 blocs à droite de l'icône
     const barX = bx + 46
-    const barW = 220
-    const barH = 12
-    ctx.font = "600 14px sans-serif"
+    ctx.font = "600 14px Oswald"
     ctx.fillStyle = '#fff'
     ctx.fillText(`${def.label.toUpperCase()}  ${val}`, barX, by - 10)
 
-    roundRect(ctx, barX, by - 2, barW, barH, 6)
-    ctx.fillStyle = 'rgba(255,255,255,0.15)'
-    ctx.fill()
-    const fillW = Math.max(4, (barW * val) / 100)
-    roundRect(ctx, barX, by - 2, fillW, barH, 6)
-    ctx.fillStyle = def.color
-    ctx.fill()
+    const filledBlocks = Math.round(val / 10)
+    const blockW = 16, blockH = 14, blockGap = 4
+    for (let i = 0; i < 10; i++) {
+      const blockX = barX + i * (blockW + blockGap)
+      roundRect(ctx, blockX, by - 2, blockW, blockH, 3)
+      ctx.fillStyle = i < filledBlocks ? def.color : 'rgba(255,255,255,0.12)'
+      ctx.fill()
+    }
 
     by += 58
   }
 
   // Footer
   ctx.textAlign = 'center'
-  ctx.font = '13px sans-serif'
+  ctx.font = '13px Oswald'
   ctx.fillStyle = 'rgba(255,255,255,0.3)'
   ctx.fillText('PHOENIX RP · FICHE PERSONNAGE', W / 2, H - 16)
   ctx.textAlign = 'left'
@@ -633,7 +646,7 @@ function drawAvatarFallback(ctx, x, y, size, profile) {
   ctx.fillStyle = profile.avatar_color ?? '#7c3aed'
   ctx.fillRect(x - size / 2, y - size / 2, size, size)
   ctx.fillStyle = '#fff'
-  ctx.font = `bold ${size * 0.36}px sans-serif`
+  ctx.font = `bold ${size * 0.36}px Oswald`
   ctx.textAlign = 'center'
   ctx.textBaseline = 'middle'
   ctx.fillText(profile.initials ?? '?', x, y)
