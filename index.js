@@ -591,17 +591,39 @@ async function generateProfileCardImage(profile) {
   ctx.fillStyle = 'rgba(255,255,255,0.7)'
   ctx.fillText(profile.location || 'Phoenix, AZ', textX, 146)
 
-  // Logo emploi en haut à droite
+  // Logo emploi — aligné sur les lignes "Fonction" et "Quartier", moins collé au bord
   if (profile.job_logo_url) {
     try {
       const logo = await loadImage(await fetchImgBuffer(profile.job_logo_url))
-      const lw = 110
+      const lw = 120
       const lh = (logo.height / logo.width) * lw
-      ctx.drawImage(logo, W - lw - 30, 24, lw, lh)
+      ctx.drawImage(logo, W - lw - 60, 90, lw, lh)
     } catch (e) {
       console.error('❌ Logo emploi non chargé:', profile.job_logo_url, '—', e.message)
     }
   }
+
+  // ── Influence Totale ──
+  const influence = STAT_DEFS.reduce((sum, def) => sum + getStatValue(profile.stats, def.key), 0) / STAT_DEFS.length / 10
+  const infX = 480, infY = 250
+  ctx.textAlign = 'left'
+  ctx.font = "700 16px Oswald"
+  ctx.fillStyle = 'rgba(255,255,255,0.55)'
+  ctx.fillText('INFLUENCE TOTALE', infX, infY)
+
+  ctx.font = "800 52px Oswald"
+  ctx.fillStyle = '#ffffff'
+  const scoreText = `${influence.toFixed(1)}`
+  ctx.fillText(scoreText, infX, infY + 54)
+  const scoreWidth = ctx.measureText(scoreText).width
+  ctx.font = "600 22px Oswald"
+  ctx.fillStyle = 'rgba(255,255,255,0.4)'
+  ctx.fillText('/10', infX + scoreWidth + 6, infY + 54)
+
+  ctx.font = "13px Oswald"
+  ctx.fillStyle = 'rgba(255,255,255,0.35)'
+  ctx.fillText('Calcul : 25% de chaque valeur /100', infX, infY + 84)
+  ctx.fillText('pour former une note finale sur 10', infX, infY + 100)
 
   // Badges de stats — colonne gauche
   const stats = profile.stats
