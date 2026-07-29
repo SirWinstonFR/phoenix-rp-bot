@@ -293,8 +293,12 @@ async function sendIdCard(characterId, discordUser) {
 // Dessine une carte d'identité façon Arizona (même esprit que le site)
 async function generateIdCardImage(profile) {
   const W = 340, H = 480
-  const canvas = createCanvas(W, H)
+  const SCALE = 3 // rendu en haute résolution pour un résultat net sur Discord
+  const canvas = createCanvas(W * SCALE, H * SCALE)
   const ctx = canvas.getContext('2d')
+  ctx.scale(SCALE, SCALE)
+  ctx.imageSmoothingEnabled = true
+  ctx.imageSmoothingQuality = 'high'
 
   // Fond crème
   roundRect(ctx, 0, 0, W, H, 16)
@@ -505,6 +509,10 @@ async function sendProfileCard(characterId, discordUser) {
 }
 
 async function fetchImgBuffer(url) {
+  // Le CDN Discord sert une petite vignette par défaut — on force une version haute résolution
+  if (url.includes('cdn.discordapp.com') && !url.includes('size=')) {
+    url += (url.includes('?') ? '&' : '?') + 'size=512'
+  }
   const res = await fetch(url)
   return Buffer.from(await res.arrayBuffer())
 }
@@ -517,8 +525,12 @@ function getStatValue(stats, key) {
 
 async function generateProfileCardImage(profile) {
   const W = 800, H = 460
-  const canvas = createCanvas(W, H)
+  const SCALE = 3 // rendu en haute résolution pour un résultat net sur Discord
+  const canvas = createCanvas(W * SCALE, H * SCALE)
   const ctx = canvas.getContext('2d')
+  ctx.scale(SCALE, SCALE)
+  ctx.imageSmoothingEnabled = true
+  ctx.imageSmoothingQuality = 'high'
 
   // Fond (image de ville)
   try {
@@ -527,6 +539,7 @@ async function generateProfileCardImage(profile) {
     const dw = bg.width * scale, dh = bg.height * scale
     ctx.drawImage(bg, (W - dw) / 2, (H - dh) / 2, dw, dh)
   } catch (e) {
+    console.error('❌ Fond non chargé:', CARD_BACKGROUND_URL, '—', e.message)
     ctx.fillStyle = '#1a1a1a'
     ctx.fillRect(0, 0, W, H)
   }
@@ -552,7 +565,8 @@ async function generateProfileCardImage(profile) {
       const scale = Math.max((avR * 2) / img.width, (avR * 2) / img.height)
       const dw = img.width * scale, dh = img.height * scale
       ctx.drawImage(img, avX - dw / 2, avY - dh / 2, dw, dh)
-    } catch {
+    } catch (e) {
+      console.error('❌ Avatar non chargé:', profile.avatar_url, '—', e.message)
       drawAvatarFallback(ctx, avX, avY, avR * 2, profile)
     }
   } else {
@@ -584,7 +598,9 @@ async function generateProfileCardImage(profile) {
       const lw = 110
       const lh = (logo.height / logo.width) * lw
       ctx.drawImage(logo, W - lw - 30, 24, lw, lh)
-    } catch {}
+    } catch (e) {
+      console.error('❌ Logo emploi non chargé:', profile.job_logo_url, '—', e.message)
+    }
   }
 
   // Badges de stats — colonne gauche
@@ -606,7 +622,9 @@ async function generateProfileCardImage(profile) {
       ctx.arc(bx, by, 25, 0, Math.PI * 2)
       ctx.clip()
       ctx.drawImage(icon, bx - 25, by - 25, 50, 50)
-    } catch {}
+    } catch (e) {
+      console.error('❌ Icône stat non chargée:', def.icon, '—', e.message)
+    }
     ctx.restore()
     ctx.beginPath()
     ctx.arc(bx, by, 28, 0, Math.PI * 2)
