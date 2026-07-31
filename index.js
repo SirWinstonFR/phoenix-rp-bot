@@ -76,6 +76,9 @@ client.on(Events.MessageCreate, async message => {
   const channelName = message.channel.name
   const discordId = message.author.id
 
+  // XP RP (indépendant du personnage — lié au compte Discord entier)
+  await grantXP(discordId, message.content.length, message.author)
+
   const chars = await getCharacters(discordId)
   if (chars.length === 0) {
     console.log(`⚠️  ${message.author.username} pas encore connecté sur le site`)
@@ -239,6 +242,88 @@ async function askWhichCharacter(message, chars, prefix) {
 }
 
 // ── Déplace un personnage sur le lieu correspondant au salon ─
+// ═══════════════════════════════════════════════════════════
+// XP / NIVEAUX
+// ═══════════════════════════════════════════════════════════
+
+const XP_PER_100_CHARS = 1
+const MAX_XP_PER_DAY   = 3
+const LEVEL_XP_STEP    = 50 // XP nécessaire pour passer un niveau
+
+// Paliers de déblocage de slots de personnages
+const CHARACTER_SLOT_UNLOCKS = [
+  { level: 1,  slots: 1 },
+  { level: 5,  slots: 2 },
+  { level: 10, slots: 3 },
+  { level: 15, slots: 4 },
+  { level: 20, slots: 5 },
+]
+
+function computeLevel(xp) {
+  return 1 + Math.floor(xp / LEVEL_XP_STEP)
+}
+
+function slotsForLevel(level) {
+  let slots = 1
+  for (const tier of CHARACTER_SLOT_UNLOCKS) {
+    if (level >= tier.level) slots = tier.slots
+  }
+  return slots
+}
+
+function todayStr() {
+  return new Date().toISOString().slice(0, 10) // YYYY-MM-DD
+}
+
+async function grantXP(discordId, messageLength, author) {
+  const { data: row } = await supabase
+    .from('discord_xp')
+    .select('*')
+    .eq('discord_id', discordId)
+    .maybeSingle()
+
+  const today = todayStr()
+  const isNewDay = !row || row.last_xp_date !== today
+  const xpToday = isNewDay ? 0 : (row.xp_today ?? 0)
+  const remainingToday = MAX_XP_PER_DAY - xpToday
+
+  if (remainingToday <= 0) return // plafond journalier déjà atteint
+
+  const rawGain = Math.floor(messageLength / 100) * XP_PER_100_CHARS
+  if (rawGain <= 0) return
+
+  const gain = Math.min(rawGain, remainingToday)
+  const newXp = (row?.xp ?? 0) + gain
+  const newXpToday = xpToday + gain
+  const oldLevel = row?.level ?? 1
+  const newLevel = computeLevel(newXp)
+
+  await supabase.from('discord_xp').upsert({
+    discord_id: discordId,
+    xp: newXp,
+    xp_today: newXpToday,
+    last_xp_date: today,
+    level: newLevel,
+    updated_at: new Date().toISOString(),
+  })
+
+  // Notifier si un nouveau palier de personnage est débloqué
+  if (newLevel > oldLevel) {
+    const oldSlots = slotsForLevel(oldLevel)
+    const newSlots = slotsForLevel(newLevel)
+    if (newSlots > oldSlots) {
+      try {
+        await author.send(
+          `🎉 Tu viens de passer **niveau ${newLevel}** !\n` +
+          `Tu peux maintenant réserver un **${newSlots}${newSlots === 2 ? 'ème' : 'ème'} personnage** sur le site Phoenix RP.`
+        )
+      } catch {}
+    }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+
 async function moveCharacterToChannel(characterId, channelName, authorName) {
   const { data: location } = await supabase
     .from('map_locations')
