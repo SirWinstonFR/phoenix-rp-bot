@@ -553,7 +553,7 @@ async function generateProfileCardImage(profile) {
   ctx.fillRect(0, 0, W, H)
 
   // Avatar en haut à gauche
-  const avX = 90, avY = 110, avR = 70
+  const avX = 118, avY = 110, avR = 70
   ctx.save()
   ctx.beginPath()
   ctx.arc(avX, avY, avR, 0, Math.PI * 2)
@@ -591,39 +591,49 @@ async function generateProfileCardImage(profile) {
   ctx.fillStyle = 'rgba(255,255,255,0.7)'
   ctx.fillText(profile.location || 'Phoenix, AZ', textX, 146)
 
-  // Logo emploi — aligné sur les lignes "Fonction" et "Quartier", moins collé au bord
+  // Logo emploi — placé dans la zone entre le texte et l'horizon
   if (profile.job_logo_url) {
     try {
       const logo = await loadImage(await fetchImgBuffer(profile.job_logo_url))
-      const lw = 120
-      const lh = (logo.height / logo.width) * lw
-      ctx.drawImage(logo, W - lw - 60, 90, lw, lh)
+      const boxX = 331, boxY = 93, boxW = 90, boxH = 80
+      const fit = Math.min(boxW / logo.width, boxH / logo.height)
+      const lw = logo.width * fit, lh = logo.height * fit
+      ctx.drawImage(logo, boxX + (boxW - lw) / 2, boxY + (boxH - lh) / 2, lw, lh)
     } catch (e) {
       console.error('❌ Logo emploi non chargé:', profile.job_logo_url, '—', e.message)
     }
   }
 
-  // ── Influence Totale ──
+  // ── Influence Totale — carte agrandie sur fond gris ──
   const influence = STAT_DEFS.reduce((sum, def) => sum + getStatValue(profile.stats, def.key), 0) / STAT_DEFS.length / 10
-  const infX = 480, infY = 250
-  ctx.textAlign = 'left'
-  ctx.font = "700 16px Oswald"
-  ctx.fillStyle = 'rgba(255,255,255,0.55)'
-  ctx.fillText('INFLUENCE TOTALE', infX, infY)
 
-  ctx.font = "800 52px Oswald"
+  const boxX = 440, boxY = 205, boxW = 315, boxH = 212
+  roundRect(ctx, boxX, boxY, boxW, boxH, 18)
+  ctx.fillStyle = 'rgba(30,30,34,0.55)'
+  ctx.fill()
+  ctx.strokeStyle = 'rgba(255,255,255,0.12)'
+  ctx.lineWidth = 1.5
+  ctx.stroke()
+
+  const infX = boxX + 26
+  ctx.textAlign = 'left'
+  ctx.font = "700 18px Oswald"
+  ctx.fillStyle = 'rgba(255,255,255,0.6)'
+  ctx.fillText('INFLUENCE TOTALE', infX, boxY + 40)
+
+  ctx.font = "800 64px Oswald"
   ctx.fillStyle = '#ffffff'
   const scoreText = `${influence.toFixed(1)}`
-  ctx.fillText(scoreText, infX, infY + 54)
+  ctx.fillText(scoreText, infX, boxY + 112)
   const scoreWidth = ctx.measureText(scoreText).width
-  ctx.font = "600 22px Oswald"
-  ctx.fillStyle = 'rgba(255,255,255,0.4)'
-  ctx.fillText('/10', infX + scoreWidth + 6, infY + 54)
+  ctx.font = "600 26px Oswald"
+  ctx.fillStyle = 'rgba(255,255,255,0.45)'
+  ctx.fillText('/10', infX + scoreWidth + 8, boxY + 112)
 
-  ctx.font = "13px Oswald"
+  ctx.font = "15px Oswald"
   ctx.fillStyle = 'rgba(255,255,255,0.35)'
-  ctx.fillText('Calcul : 25% de chaque valeur /100', infX, infY + 84)
-  ctx.fillText('pour former une note finale sur 10', infX, infY + 100)
+  ctx.fillText('Calcul : 25% de chaque valeur /100', infX, boxY + 150)
+  ctx.fillText('pour former une note finale sur 10', infX, boxY + 170)
 
   // Badges de stats — colonne gauche
   const stats = profile.stats
